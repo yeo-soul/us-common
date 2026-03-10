@@ -1,0 +1,123 @@
+name: Deploy Staread Environment
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: string
+      target:
+        description: 'Target branch/commit'
+        required: true
+        type: string
+      server_host:
+        description: 'Target server IP'
+        required: true
+        type: string
+      ssh_username:
+        description: 'SSH Username'
+        required: true
+        type: string
+      deploy_script:
+        description: 'Deployment script path'
+        required: false
+        type: string
+        default: '.github/scripts/deploy.sh'
+      # 用于 prod 环境的额外鉴权参数
+      confirm:
+        description: 'Confirmation text from caller (prod only)'
+        required: false
+        type: string
+      allowed_users:
+        description: 'Allowed users to deploy (prod only)'
+        required: false
+        type: string
+        default: 'Kinping-Tse'
+      confirm_code:
+        description: 'Confirm code to deploy (prod only)'
+        required: false
+        type: string
+        default: 'CONFIRM-PROD-DEPLOY'
+    secrets:
+      ssh_private_key:
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    steps:
+    # 仅非 prod 环境直接跳过该阶段，prod 环境下进行鉴权拦截
+    - name: Check deployment permission
+      if: inputs.environment == 'prod'
+      run: |
+        ALLOWED_USERS="${{ inputs.allowed_users }}"
+        CURRENT_USER="${{ github.actor }}"
+
+        echo "🔍 Checking deployment permission..."
+        echo "Current user: $CURRENT_USER"
+        echo "Allowed users: $ALLOWED_USERS"
+
+        if [ -z "$ALLOWED_USERS" ]; then
+          echo "❌ DEPLOY_ALLOWED_USERS variable is not set"
+          echo "Please configure this variable in repository Settings > Variables"
+          exit 1
+        fi
+
+        if [[ " $ALLOWED_USERS " =~ " $CURRENT_USER " ]]; then
+          echo "✅ User $CURRENT_USER is authorized for production deployment"
+        else
+          echo "❌ User $CURRENT_USER is not authorized for production deployment"
+          echo "Contact repository admin to get production deployment permission"
+          exit 1
+        fi
+
+    # 验证是否确认 prod 部署
+    - name: Validate confirmation
+      if: inputs.environment == 'prod'
+      run: |
+        REQUIRED_CONFIRM="${{ inputs.confirm_code }}"
+        USER_INPUT="${{ inputs.confirm }}"
+
+        if [ "$USER_INPUT" != "$REQUIRED_CONFIRM" ]; then
+          echo "❌ Deployment cancelled. You must type '$REQUIRED_CONFIRM' to confirm."
+          echo "This is a safety measure to prevent accidental production deployments."
+          exit 1
+        fi
+        echo "✅ Production deployment confirmed"
+
+    - name: Deploy to Server
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ inputs.server_host }}
+        username: ${{ inputs.ssh_username }}
+        key: ${{ secrets.ssh_private_key }}
+        script_stop: true
+        script: |
+          DEPLOY_SCRIPT="${{ inputs.deploy_script }}"
+          GITHUB_REPOSITORY="${{ github.repository }}"
+          ENVIRONMENT="${{ inputs.environment }}"
+          TARGET="${{ inputs.target }}"
+
+          REPO_NAME="${GITHUB_REPOSITORY##*/}"
+          TMP_DIR="/tmp/deploy-${REPO_NAME}-${{ github.run_id }}-${RANDOM}"
+
+          echo "🚀 Starting $ENVIRONMENT deployment to target: $TARGET"
+          echo "Triggered by: ${{ github.actor }}"
+          echo "Working directory: $TMP_DIR"
+
+          # 创建唯一的隔离目录，并设置 trap 在退出时自动清理目录
+          rm -rf "$TMP_DIR"
+          trap 'rm -rf "$TMP_DIR"; echo "🧹 Cleaned up $TMP_DIR on exit"' EXIT
+
+          # 拉取代码并执行发布脚本
+          git clone --recurse-submodules --depth=1 git@github.com:${GITHUB_REPOSITORY}.git "$TMP_DIR"
+          cd "$TMP_DIR"
+          if [[ "$TARGET" != "HEAD~"* ]]; then
+            git fetch origin "$TARGET" --depth=1 && git checkout -qf FETCH_HEAD || echo "⚠️ Cannot checkout $TARGET, using default script"
+          fi
+          cd /tmp
+          chmod +x "$TMP_DIR/$DEPLOY_SCRIPT"
+          "$TMP_DIR/$DEPLOY_SCRIPT" "$GITHUB_REPOSITORY" "$ENVIRONMENT" "$TARGET"
