@@ -116,7 +116,13 @@ jobs:
           git clone --recurse-submodules --depth=1 git@github.com:${GITHUB_REPOSITORY}.git "$TMP_DIR"
           cd "$TMP_DIR"
           if [[ "$TARGET" != "HEAD~"* ]]; then
-            git fetch origin "$TARGET" --depth=1 && git checkout -qf FETCH_HEAD || echo "⚠️ Cannot checkout $TARGET, using default script"
+            if git fetch origin "$TARGET" --depth=1 && git checkout -qf FETCH_HEAD; then
+              # 切换分支后，主仓库的子模块指针可能已偏移，需要手动同步并更新
+              git submodule sync --recursive
+              git submodule update --init --recursive --depth=1 || echo "⚠️ Submodule update failed"
+            else
+              echo "⚠️ Cannot checkout $TARGET, using default script"
+            fi
           fi
           cd /tmp
           chmod +x "$TMP_DIR/$DEPLOY_SCRIPT"
