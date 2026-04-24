@@ -11,8 +11,8 @@ on:
         description: 'Target branch/commit'
         required: true
         type: string
-      server_host:
-        description: 'Target server IP'
+      server_hosts:
+        description: 'Target server IPs (comma separated)'
         required: true
         type: string
       ssh_username:
@@ -44,9 +44,26 @@ on:
         required: true
 
 jobs:
+  prepare-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      hosts: ${{ steps.set-matrix.outputs.hosts }}
+    steps:
+      - id: set-matrix
+        run: |
+          # 提取以逗号分隔的 IP 字符串并利用 jq 转为严格的 JSON 数组格式
+          # 过滤掉可能的空字符串，保证 matrix 解析安全
+          HOSTS_JSON=$(echo "${{ inputs.server_hosts }}" | jq -R -c 'split(",") | map(select(length > 0))')
+          echo "hosts=$HOSTS_JSON" >> $GITHUB_OUTPUT
+
   deploy:
+    needs: prepare-matrix
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
+    strategy:
+      fail-fast: false
+      matrix:
+        server: ${{ fromJSON(needs.prepare-matrix.outputs.hosts) }}
 
     steps:
     # 仅非 prod 环境直接跳过该阶段，prod 环境下进行鉴权拦截
@@ -88,10 +105,10 @@ jobs:
         fi
         echo "✅ Production deployment confirmed"
 
-    - name: Deploy to Server
+    - name: Deploy to Server ${{ matrix.server }}
       uses: appleboy/ssh-action@v1.0.3
       with:
-        host: ${{ inputs.server_host }}
+        host: ${{ matrix.server }}
         username: ${{ inputs.ssh_username }}
         key: ${{ secrets.ssh_private_key }}
         script_stop: true
